@@ -7,7 +7,7 @@ define('DEV_USERNAME', '@woo4o');
 
 // إعداد السجلات (Logging) المبسط
 function logger($level, $message) {
-    echo "[" . date('Y-m-d H:i:s') . "] [$level] $message\n";
+    // يمكن تركها فارغة أو لتسجيل الأخطاء
 }
 
 class Core {
@@ -55,7 +55,6 @@ class Core {
         curl_close($ch);
 
         if ($error) {
-            logger("ERROR", "cURL Error: $error");
             return false;
         }
         return $response;
@@ -70,7 +69,7 @@ class Core {
     }
 
     public function ai_chat($message) {
-        $uuid = bin2hex(random_bytes(16)); // توليد معرف عشوائي مثل uuid4().hex
+        $uuid = bin2hex(random_bytes(16));
         $payload = http_build_query([
             "message" => $message,
             "dialogs[0][role]" => "user",
@@ -85,7 +84,7 @@ class Core {
         $fx_resp = $this->curl_request($this->endpoints["fx"]);
         if (!$fx_resp) return null;
         $fx = json_decode($fx_resp, true);
-        $iqd = $fx["rates"]["IQD"] ?? 1310; // قيمة افتراضية في حال الفشل
+        $iqd = $fx["rates"]["IQD"] ?? 1310;
 
         $params = http_build_query(["vs_currency" => "usd", "ids" => implode(",", array_keys($this->coins))]);
         $crypto_resp = $this->curl_request($this->endpoints["crypto"] . "?" . $params);
@@ -125,8 +124,9 @@ class Core {
     }
 }
 
+// تخزين الحالات (كمثال مبسط للويب هوك)
 $core = new Core();
-$user_states = []; // لحفظ حالة المستخدم (مثلاً: ينتظر رابط تيك توك، أو في وضع الذكاء الاصطناعي)
+$user_states = [];
 
 // لوحات المفاتيح
 function main_kb() {
@@ -161,7 +161,6 @@ function bot_api($method, $data = []) {
     return json_decode($res, true);
 }
 
-// دالة إرسال الرسائل
 function send_message($chat_id, $text, $reply_markup = null, $parse_mode = "HTML") {
     $data = [
         'chat_id' => $chat_id,
@@ -187,12 +186,11 @@ function delete_message($chat_id, $message_id) {
     bot_api('deleteMessage', ['chat_id' => $chat_id, 'message_id' => $message_id]);
 }
 
-// المعالجة الرئيسية للرسائل
-function handle_update($update) {
-    global $core, $user_states;
+// المعالجة الرئيسية للرسائل الواردة عبر الويب هوك
+$content = file_get_contents("php://input");
+$update = json_decode($content, true);
 
-    if (!isset($update['message']['text'])) return;
-    
+if ($update && isset($update['message']['text'])) {
     $message = $update['message'];
     $chat_id = $message['chat']['id'];
     $text = $message['text'];
@@ -201,43 +199,32 @@ function handle_update($update) {
     $mention = "<a href='tg://user?id={$uid}'>" . htmlspecialchars($user['first_name'] ?? 'User') . "</a>";
 
     $core->get_user($uid);
-    $current_state = $user_states[$uid] ?? 'IDLE';
 
-    // الأوامر العامة والإلغاء
     if ($text === '/start') {
-        unset($user_states[$uid]);
         $msg = "Welcome $mention!\n\nI am your all-in-one assistant bot.\nDeveloped by " . DEV_USERNAME;
         send_message($chat_id, $msg, main_kb());
-        return;
+        exit;
     }
 
     if ($text === '❌ Cancel' || $text === '/cancel') {
-        unset($user_states[$uid]);
         send_message($chat_id, "Cancelled.", main_kb());
-        return;
+        exit;
     }
 
-    // التنقل بين القوائم الرئيسية (في حال لم يكن ينتظر إدخال محدد)
     $menu_options = ["🎬 TikTok", "📥 YouTube", "🔗 Shorten", "🤖 AI", "💰 Crypto", "🌐 Proxies", "📊 My Info", "ℹ️ About"];
     
     if (in_array($text, $menu_options)) {
-        unset($user_states[$uid]); // تصفير الحالة السابقة
-        
         switch ($text) {
             case "🎬 TikTok":
-                $user_states[$uid] = 'TIKTOK';
                 send_message($chat_id, "Send TikTok link:", cancel_kb());
                 break;
             case "📥 YouTube":
-                $user_states[$uid] = 'YOUTUBE';
                 send_message($chat_id, "Send YouTube link:", cancel_kb());
                 break;
             case "🔗 Shorten":
-                $user_states[$uid] = 'SHORTEN';
                 send_message($chat_id, "Send URL to shorten:", cancel_kb());
                 break;
             case "🤖 AI":
-                $user_states[$uid] = 'AI';
                 send_message($chat_id, "🤖 AI Mode ON.\nSend your message or press Cancel.", cancel_kb());
                 break;
             case "💰 Crypto":
@@ -254,14 +241,14 @@ function handle_update($update) {
                 $proxies = $core->get_proxies();
                 if (!$proxies) {
                     edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to fetch proxies.\nPlease try again later.");
-                    return;
+                    exit;
                 }
                 $lines = array_filter(explode("\n", $proxies), function($l) {
                     return strpos(trim($l), "https://t.me/") === 0;
                 });
                 if (empty($lines)) {
                     edit_message($chat_id, $wait['result']['message_id'], "⚠️ No proxies found in the source.");
-                    return;
+                    exit;
                 }
                 $chunks = array_chunk(array_values($lines), 10);
                 $sent = 0;
@@ -281,95 +268,66 @@ function handle_update($update) {
                 send_message($chat_id, $msg);
                 break;
         }
-        return;
+        exit;
     }
 
-    // معالجة المدخلات بناءً على الحالة الحالية للمستخدم
-    if ($current_state === 'TIKTOK') {
-        $wait = send_message($chat_id, "⏳ Processing your TikTok link...");
-        $data = $core->tiktok_download($text);
-        if (!$data || empty($data['success'])) {
-            edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to fetch TikTok video.\nPlease check the link and try again.");
-        } else {
-            $d = $data['data'];
-            $title = htmlspecialchars($d['title']);
-            $author = htmlspecialchars($d['author']['username']);
-            $caption = "<b>{$title}</b>\nBy: {$author}\n👁 " . number_format($d['stats']['plays']) . " | ❤️ " . number_format($d['stats']['likes']) . " | 💬 " . number_format($d['stats']['comments']);
-            $video_url = !empty($d['downloads']['videoHD']) ? $d['downloads']['videoHD'] : $d['downloads']['videoSD'];
-            $audio_url = $d['downloads']['audio'];
-            
-            bot_api('sendVideo', ['chat_id' => $chat_id, 'video' => $video_url, 'caption' => $caption, 'parse_mode' => 'HTML']);
-            bot_api('sendAudio', ['chat_id' => $chat_id, 'audio' => $audio_url, 'title' => $d['title']]);
-            delete_message($chat_id, $wait['result']['message_id']);
-        }
-        
-    } elseif ($current_state === 'YOUTUBE') {
-        $wait = send_message($chat_id, "⏳ Processing your YouTube link...");
-        $data = $core->youtube_download($text);
-        if (!$data || !empty($data['error'])) {
-            edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to fetch YouTube video.\nPlease check the link and try again.");
-        } else {
-            $best = null;
-            foreach ($data['medias'] ?? [] as $m) {
-                if (($m['type'] ?? '') === 'video' && ($m['extension'] ?? '') === 'mp4') {
-                    if (!$best || ($m['height'] ?? 0) > ($best['height'] ?? 0)) {
+    // روابط التحميل أو الذكاء الاصطناعي بناءً على محتوى الرسالة
+    if (filter_var($text, FILTER_VALIDATE_URL)) {
+        if (strpos($text, 'tiktok.com') !== false) {
+            $wait = send_message($chat_id, "⏳ Processing your TikTok link...");
+            $data = $core->tiktok_download($text);
+            if (!$data || empty($data['success'])) {
+                edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to fetch TikTok video.");
+            } else {
+                $d = $data['data'];
+                $title = htmlspecialchars($d['title'] ?? '');
+                $author = htmlspecialchars($d['author']['username'] ?? '');
+                $caption = "<b>{$title}</b>\nBy: {$author}";
+                $video_url = !empty($d['downloads']['videoHD']) ? $d['downloads']['videoHD'] : $d['downloads']['videoSD'];
+                bot_api('sendVideo', ['chat_id' => $chat_id, 'video' => $video_url, 'caption' => $caption, 'parse_mode' => 'HTML']);
+                delete_message($chat_id, $wait['result']['message_id']);
+            }
+        } elseif (strpos($text, 'youtube.com') !== false || strpos($text, 'youtu.be') !== false) {
+            $wait = send_message($chat_id, "⏳ Processing your YouTube link...");
+            $data = $core->youtube_download($text);
+            if (!$data || !empty($data['error'])) {
+                edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to fetch YouTube video.");
+            } else {
+                $best = null;
+                foreach ($data['medias'] ?? [] as $m) {
+                    if (($m['type'] ?? '') === 'video' && ($m['extension'] ?? '') === 'mp4') {
                         $best = $m;
+                        break;
                     }
                 }
+                if ($best) {
+                    $url = $best['url_proxy'] ?? $best['url'];
+                    bot_api('sendVideo', ['chat_id' => $chat_id, 'video' => $url, 'caption' => "YouTube Video"]);
+                    delete_message($chat_id, $wait['result']['message_id']);
+                } else {
+                    edit_message($chat_id, $wait['result']['message_id'], "⚠️ No MP4 video found.");
+                }
             }
-            if ($best) {
-                $url = !empty($best['url_proxy']) ? $best['url_proxy'] : $best['url'];
-                $title = htmlspecialchars($data['title'] ?? 'YouTube Video');
-                $quality = $best['quality'] ?? '';
-                bot_api('sendVideo', ['chat_id' => $chat_id, 'video' => $url, 'caption' => "{$title}\n\nQuality: {$quality}", 'parse_mode' => 'HTML']);
-                delete_message($chat_id, $wait['result']['message_id']);
-            } else {
-                edit_message($chat_id, $wait['result']['message_id'], "⚠️ No MP4 video found in this link.");
-            }
-        }
-
-    } elseif ($current_state === 'SHORTEN') {
-        $wait = send_message($chat_id, "⏳ Shortening URL...");
-        $result = $core->shorten_url($text);
-        if (!$result) {
-            edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to shorten URL.\nPlease check the link and try again.");
         } else {
-            edit_message($chat_id, $wait['result']['message_id'], "✅ Shortened URL:\n<code>{$result}</code>");
+            // اعتبارها كاختصار رابط
+            $wait = send_message($chat_id, "⏳ Shortening URL...");
+            $result = $core->shorten_url($text);
+            if (!$result) {
+                edit_message($chat_id, $wait['result']['message_id'], "❌ Failed to shorten URL.");
+            } else {
+                edit_message($chat_id, $wait['result']['message_id'], "✅ Shortened URL:\n<code>{$result}</code>");
+            }
         }
-
-    } elseif ($current_state === 'AI') {
+    } else {
+        // رسالة نصية عادية تعتبر ذكاء اصطناعي AI
         $wait = send_message($chat_id, "🤖 Thinking...");
         $res = $core->ai_chat($text);
         if (!$res) {
-            edit_message($chat_id, $wait['result']['message_id'], "❌ AI service is unavailable.\nPlease try again later.");
+            edit_message($chat_id, $wait['result']['message_id'], "❌ AI service is unavailable.");
         } else {
             edit_message($chat_id, $wait['result']['message_id'], substr($res, 0, 4096));
         }
-
-    } else {
-        send_message($chat_id, "Use the buttons below.", main_kb());
     }
 }
-
-// حلقة الاستماع المستمر (Long Polling)
-logger("INFO", "Bot is starting...");
-$offset = 0;
-
-while (true) {
-    $updates = bot_api('getUpdates', ['offset' => $offset, 'timeout' => 30]);
-    
-    if (isset($updates['result']) && is_array($updates['result'])) {
-        foreach ($updates['result'] as $update) {
-            $offset = $update['update_id'] + 1;
-            try {
-                handle_update($update);
-            } catch (Exception $e) {
-                logger("ERROR", "Exception: " . $e->getMessage());
-            }
-        }
-    }
-    // تأخير بسيط لتخفيف الضغط على المعالج
-    usleep(100000); 
-}
-
 ?>
+
